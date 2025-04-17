@@ -1,0 +1,139 @@
+#-------------------------------
+# PAD Screening Cost-Benefit Analysis: MACE/ESRD Explicit Model
+#-------------------------------
+
+# 0. PACKAGE MANAGEMENT
+if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
+if (!requireNamespace("ggplot2", quietly = TRUE)) install.packages("ggplot2")
+if (!requireNamespace("reshape2", quietly = TRUE)) install.packages("reshape2")
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+
+# 1. INPUT PARAMETERS (update with real-world rates as needed)
+params <- list(
+  cohort_n        = 100000, # Larger sample size for integer event counts
+  prevalence      = 0.12,
+  abi_cost        = 100,
+  visit_cost      = 200,
+  med_monthly     = 11.12 * 2,
+  tx_cost = list(
+    medicaid = c(asymptomatic=1200, symptomatic=1500, cli=15000, amputation=30000),
+    societal = c(asymptomatic=1500, symptomatic=1800, cli=18000, amputation=45000)
+  ),
+  utilities      = c(no_pad=1.00, asymptomatic=0.85, symptomatic=0.70, cli=0.50, amputation=0.40),
+  # Example: 10-year MACE risk in PAD ~20%, ESRD ~5%. Adjust as needed.
+  trans_probs = list(
+    screen    = c(no_pad_to_asx=0.03, asx_to_sx=0.10, sx_to_cli=0.05, cli_to_amp=0.15, death=0.01, mace=0.02, esrd=0.005),
+    no_screen = c(no_pad_to_asx=0.03, asx_to_sx=0.12, sx_to_cli=0.07, cli_to_amp=0.20, death=0.01, mace=0.03, esrd=0.007)
+  ),
+  # Direct costs (update with real values)
+  mace_cost = 25000, # incremental cost per MACE event
+  esrd_cost = 90000, # incremental cost per ESRD event
+  # Societal costs
+  prod_loss_mace = 10000, # productivity loss per MACE
+  prod_loss_esrd = 25000, # productivity loss per ESRD
+  welfare_sav_mace = 5000, # welfare program saving per MACE averted
+  welfare_sav_esrd = 10000, # welfare program saving per ESRD averted
+  # QALY loss per event (example values)
+  qaly_loss_mace = 0.2,
+  qaly_loss_esrd = 0.4,
+  # WTP for QALY
+  wtp_qaly = 200000
+)
+
+# 2. MARKOV MODEL FUNCTION (simplified for demonstration)
+run_analysis <- function(strategy, perspective, horizon) {
+  p <- params$trans_probs[[ if(strategy=="Screen") "screen" else "no_screen" ]]
+  n <- params$cohort_n
+
+  # Simulate events (binomial draws for demonstration)
+  mace_events <- rbinom(1, n, p["mace"])
+  esrd_events <- rbinom(1, n, p["esrd"])
+  deaths      <- rbinom(1, n, p["death"] * horizon) # crude, for demonstration
+
+  # Costs
+  treat_cost <- if(strategy=="Screen") {
+    n * (params$abi_cost + params$visit_cost) + n * params$prevalence * horizon * params$med_monthly
+  } else 0
+
+  event_cost <- mace_events * params$mace_cost + esrd_events * params$esrd_cost
+  total_cost <- treat_cost + event_cost
+
+  # QALYs
+  qaly_loss <- mace_events * params$qaly_loss_mace + esrd_events * params$qaly_loss_esrd
+  qaly <- n * horizon - qaly_loss # crude, for demonstration
+
+  # Societal savings
+  prod_gain <- mace_events * params$prod_loss_mace + esrd_events * params$prod_loss_esrd
+  welfare_gain <- mace_events * params$welfare_sav_mace + esrd_events * params$welfare_sav_esrd
+
+  # Monetized QALY
+  mon_qaly <- qaly * params$wtp_qaly
+  net_benefit <- mon_qaly - total_cost + prod_gain + welfare_gain
+
+  data.frame(
+    Strategy = strategy,
+    Perspective = perspective,
+    Horizon = horizon,
+    Treatment_Cost = treat_cost,
+    Event_Cost = event_cost,
+    Total_Cost = total_cost,
+    MACE_Events = mace_events,
+    ESRD_Events = esrd_events,
+    Deaths = deaths,
+    QALY = qaly,
+    Monetized_QALY = mon_qaly,
+    Productivity_Gain = prod_gain,
+    Welfare_Program_Saving = welfare_gain,
+    Net_Benefit = net_benefit,
+    stringsAsFactors = FALSE
+  )
+}
+
+# 3. RUN ALL SCENARIOS
+scenarios <- expand.grid(
+  Strategy    = c("Screen","No_Screen"),
+  Perspective = c("medicaid","societal"),
+  Horizon     = c(5,30),
+  stringsAsFactors = FALSE
+)
+res_list <- lapply(seq_len(nrow(scenarios)), function(i) {
+  run_analysis(
+    scenarios$Strategy[i],
+    scenarios$Perspective[i],
+    scenarios$Horizon[i]
+  )
+})
+res <- do.call(rbind, res_list)
+
+# 4. OUTPUT TABLES WITH EXPLANATORY NOTES
+print(res)
+cat("\nNotes on Output Columns:\n")
+cat("
+- Strategy: Whether the cohort received PAD screening (Screen) or not (No_Screen).
+- Perspective: 'medicaid' (direct medical costs only) or 'societal' (includes productivity and welfare).
+- Horizon: Time window in years.
+- Treatment_Cost: Total cost of screening and preventive therapy for the cohort.
+- Event_Cost: Total cost incurred by MACE and ESRD events in the cohort.
+- Total_Cost: Sum of Treatment_Cost and Event_Cost.
+- MACE_Events: Number of major adverse cardiovascular events (e.g., heart attack, stroke) in the cohort.
+- ESRD_Events: Number of end-stage renal disease events in the cohort.
+- Deaths: Number of deaths in the cohort over the time horizon.
+- QALY: Total quality-adjusted life years for the cohort (after subtracting QALY loss from events).
+- Monetized_QALY: Total QALYs multiplied by the societal willingness-to-pay per QALY.
+- Productivity_Gain: Societal productivity gain from MACE/ESRD events averted.
+- Welfare_Program_Saving: Societal welfare program cost saving from MACE/ESRD events averted.
+- Net_Benefit: Monetized_QALY plus Productivity_Gain and Welfare_Program_Saving, minus Total_Cost.
+\n")
+
+# 5. PEDAGOGICAL NOTE:
+cat("
+Pedagogical Note:
+This model simulates a large cohort (100,000) to ensure event counts are realistic integers. 
+It explicitly models major adverse cardiovascular events (MACE) and end-stage renal disease (ESRD), 
+with all costs and QALY losses assigned to these events. 
+Societal perspective includes not only direct medical costs, but also productivity and welfare program impacts.
+Incremental treatment costs and event-related cost savings are reported separately, 
+so decision makers can see both the costs of early detection and the savings from events averted.
+")
