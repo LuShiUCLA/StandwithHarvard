@@ -138,35 +138,49 @@ Incremental treatment costs and event-related cost savings are reported separate
 so decision makers can see both the costs of early detection and the savings from events averted.
 ")
 # ----------------------- #
-# 5. COMPREHENSIVE HEATMAP
+# 5. COMPREHENSIVE HEATMAP (Per‑Person) 
 # ----------------------- #
 
-# Create a Scenario label to identify each row
-res$Scenario <- paste(res$Strategy, res$Perspective, res$Horizon, sep = "_")
+# 5.1 Create a per‑person copy of res
+res_pp <- res
 
-# Melt only the numeric result columns into long form
-long_res <- melt(
-  res,
-  id.vars   = "Scenario",
+# Divide all cost/benefit columns by cohort size
+per_person_cols <- c(
+  "Treatment_Cost", "Event_Cost", "Total_Cost",
+  "QALY", "Monetized_QALY",
+  "Productivity_Gain", "Welfare_Program_Saving",
+  "Net_Benefit"
+)
+res_pp[per_person_cols] <- res_pp[per_person_cols] / params$cohort_n
+
+# Scenario label
+res_pp$Scenario <- paste(res_pp$Strategy, res_pp$Perspective, res_pp$Horizon, sep = "_")
+
+# Melt to long form
+long_pp <- reshape2::melt(
+  res_pp,
+  id.vars     = "Scenario",
   measure.vars = c(
-    "Treatment_Cost", "Event_Cost", "Total_Cost",
-    "MACE_Events", "ESRD_Events", "Deaths",
-    "QALY", "Monetized_QALY",
-    "Productivity_Gain", "Welfare_Program_Saving",
-    "Net_Benefit"
+    per_person_cols,
+    "MACE_Events", "ESRD_Events", "Deaths"
   ),
   variable.name = "Metric",
   value.name    = "Value"
 )
 
-# Plot heatmap
-heatmap_all <- ggplot(long_res, aes(x = Metric, y = Scenario, fill = Value)) +
+# 5.2 Plot per‑person heatmap
+heatmap_pp <- ggplot(long_pp, aes(x = Metric, y = Scenario, fill = Value)) +
   geom_tile(color = "white") +
-  geom_text(aes(label = round(Value, 0)), size = 2.5) +
+  geom_text(aes(label = ifelse(
+    Metric %in% per_person_cols,
+    scales::comma(round(Value, 2)),          # two decimals + comma
+    as.integer(Value)                        # integer for counts
+  )), size = 2.5) +
   scale_fill_gradient(low = "white", high = "steelblue") +
   labs(
-    title = "Comprehensive CBA Results by Scenario",
-    x = NULL, y = NULL, fill = "Value"
+    title = "Per‑Person CBA Results by Scenario",
+    subtitle = "Costs, QALYs and Savings are divided by cohort size",
+    x = NULL, y = NULL, fill = "Value per Person"
   ) +
   theme_minimal(base_size = 10) +
   theme(
@@ -175,4 +189,6 @@ heatmap_all <- ggplot(long_res, aes(x = Metric, y = Scenario, fill = Value)) +
     panel.grid = element_blank()
   )
 
-print(heatmap_all)
+print(heatmap_pp)
+
+
