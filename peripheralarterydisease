@@ -12,7 +12,7 @@ library(reshape2)
 
 # 1. INPUT PARAMETERS (update with real-world rates as needed)
 params <- list(
-  cohort_n        = 100000, # Larger sample size for integer event counts
+  cohort_n        = 10000, # Larger sample size for integer event counts
   prevalence      = 0.12,
   abi_cost        = 100,
   visit_cost      = 200,
