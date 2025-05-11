@@ -1,7 +1,3 @@
-#-------------------------------
-# PAD Screening Cost-Benefit Analysis: MACE/ESRD Explicit Model
-#-------------------------------
-
 # 0. PACKAGE MANAGEMENT
 if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
 if (!requireNamespace("ggplot2", quietly = TRUE)) install.packages("ggplot2")
@@ -10,83 +6,73 @@ library(dplyr)
 library(ggplot2)
 library(reshape2)
 
-# 1. INPUT PARAMETERS (update with real-world rates as needed)
+# 1. INPUT PARAMETERS
 params <- list(
-  cohort_n        = 10000, # Larger sample size for integer event counts
-  prevalence      = 0.12,
+  cohort_n        = 500,
+  prevalence      = 0.20,
   abi_cost        = 100,
   visit_cost      = 200,
   med_monthly     = 11.12 * 2,
+  # Only used for illustration, not applied in this simplified model
   tx_cost = list(
     medicaid = c(asymptomatic=1200, symptomatic=1500, cli=15000, amputation=30000),
     societal = c(asymptomatic=1500, symptomatic=1800, cli=18000, amputation=45000)
   ),
-  utilities      = c(no_pad=1.00, asymptomatic=0.85, symptomatic=0.70, cli=0.50, amputation=0.40),
-  # Example: 10-year MACE risk in PAD ~20%, ESRD ~5%. Adjust as needed.
   trans_probs = list(
-    screen    = c(no_pad_to_asx=0.03, asx_to_sx=0.10, sx_to_cli=0.05, cli_to_amp=0.15, death=0.01, mace=0.02, esrd=0.005),
-    no_screen = c(no_pad_to_asx=0.03, asx_to_sx=0.12, sx_to_cli=0.07, cli_to_amp=0.20, death=0.01, mace=0.03, esrd=0.007)
+    screen    = c(mace=0.02, esrd=0.005, death=0.01),
+    no_screen = c(mace=0.03, esrd=0.007, death=0.01)
   ),
-  # Direct costs (update with real values)
-  mace_cost = 25000, # incremental cost per MACE event
-  esrd_cost = 90000, # incremental cost per ESRD event
-  # Societal costs
-  prod_loss_mace = 10000, # productivity loss per MACE
-  prod_loss_esrd = 25000, # productivity loss per ESRD
-  welfare_sav_mace = 5000, # welfare program saving per MACE averted
-  welfare_sav_esrd = 10000, # welfare program saving per ESRD averted
-  # QALY loss per event (example values)
+  mace_cost = 25000,
+  esrd_cost = 90000,
+  prod_loss_mace = 10000,
+  prod_loss_esrd = 25000,
+  welfare_cost_mace = 5000,
+  welfare_cost_esrd = 10000,
   qaly_loss_mace = 0.2,
-  qaly_loss_esrd = 0.4,
-  # WTP for QALY
-  wtp_qaly = 200000
+  qaly_loss_esrd = 0.4
 )
 
-# 2. MARKOV MODEL FUNCTION (simplified for demonstration)
+# 2. ANALYSIS FUNCTION (PERSPECTIVE-SPECIFIC)
 run_analysis <- function(strategy, perspective, horizon) {
-  p <- params$trans_probs[[ if(strategy=="Screen") "screen" else "no_screen" ]]
+  p <- params$trans_probs[[ifelse(strategy=="Screen", "screen", "no_screen")]]
   n <- params$cohort_n
-
-  # Simulate events (binomial draws for demonstration)
-  mace_events <- rbinom(1, n, p["mace"])
-  esrd_events <- rbinom(1, n, p["esrd"])
-  deaths      <- rbinom(1, n, p["death"] * horizon) # crude, for demonstration
-
-  # Costs
-  treat_cost <- if(strategy=="Screen") {
-    n * (params$abi_cost + params$visit_cost) + n * params$prevalence * horizon * params$med_monthly
+  
+  # Event counts
+  mace_events <- n * p["mace"] * horizon
+  esrd_events <- n * p["esrd"] * horizon
+  deaths      <- n * p["death"] * horizon
+  
+  # Treatment cost: only for Screen
+  treat_cost <- if(strategy == "Screen") {
+    screening_cost <- n * (params$abi_cost + params$visit_cost)
+    med_cost <- n * params$prevalence * horizon * 12 * params$med_monthly
+    screening_cost + med_cost
   } else 0
-
+  
+  # Event costs (same for both perspectives)
   event_cost <- mace_events * params$mace_cost + esrd_events * params$esrd_cost
-  total_cost <- treat_cost + event_cost
-
-  # QALYs
+  
+  # Societal costs (only for societal perspective)
+  prod_loss <- if(perspective == "societal") {
+    mace_events * params$prod_loss_mace + esrd_events * params$prod_loss_esrd
+  } else 0
+  welfare_cost <- if(perspective == "societal") {
+    mace_events * params$welfare_cost_mace + esrd_events * params$welfare_cost_esrd
+  } else 0
+  
+  # Total cost
+  total_cost <- treat_cost + event_cost + prod_loss + welfare_cost
+  
+  # QALY calculation
   qaly_loss <- mace_events * params$qaly_loss_mace + esrd_events * params$qaly_loss_esrd
-  qaly <- n * horizon - qaly_loss # crude, for demonstration
-
-  # Societal savings
-  prod_gain <- mace_events * params$prod_loss_mace + esrd_events * params$prod_loss_esrd
-  welfare_gain <- mace_events * params$welfare_sav_mace + esrd_events * params$welfare_sav_esrd
-
-  # Monetized QALY
-  mon_qaly <- qaly * params$wtp_qaly
-  net_benefit <- mon_qaly - total_cost + prod_gain + welfare_gain
-
+  qaly <- n * horizon - qaly_loss
+  
   data.frame(
     Strategy = strategy,
     Perspective = perspective,
     Horizon = horizon,
-    Treatment_Cost = treat_cost,
-    Event_Cost = event_cost,
     Total_Cost = total_cost,
-    MACE_Events = mace_events,
-    ESRD_Events = esrd_events,
-    Deaths = deaths,
     QALY = qaly,
-    Monetized_QALY = mon_qaly,
-    Productivity_Gain = prod_gain,
-    Welfare_Program_Saving = welfare_gain,
-    Net_Benefit = net_benefit,
     stringsAsFactors = FALSE
   )
 }
@@ -98,97 +84,52 @@ scenarios <- expand.grid(
   Horizon     = c(5,30),
   stringsAsFactors = FALSE
 )
-res_list <- lapply(seq_len(nrow(scenarios)), function(i) {
-  run_analysis(
-    scenarios$Strategy[i],
-    scenarios$Perspective[i],
-    scenarios$Horizon[i]
-  )
-})
-res <- do.call(rbind, res_list)
+res <- do.call(rbind, lapply(seq_len(nrow(scenarios)), function(i) {
+  run_analysis(scenarios$Strategy[i], scenarios$Perspective[i], scenarios$Horizon[i])
+}))
 
-# 4. OUTPUT TABLES WITH EXPLANATORY NOTES
-print(res)
-cat("\nNotes on Output Columns:\n")
-cat("
-- Strategy: Whether the cohort received PAD screening (Screen) or not (No_Screen).
-- Perspective: 'medicaid' (direct medical costs only) or 'societal' (includes productivity and welfare).
-- Horizon: Time window in years.
-- Treatment_Cost: Total cost of screening and preventive therapy for the cohort.
-- Event_Cost: Total cost incurred by MACE and ESRD events in the cohort.
-- Total_Cost: Sum of Treatment_Cost and Event_Cost.
-- MACE_Events: Number of major adverse cardiovascular events (e.g., heart attack, stroke) in the cohort.
-- ESRD_Events: Number of end-stage renal disease events in the cohort.
-- Deaths: Number of deaths in the cohort over the time horizon.
-- QALY: Total quality-adjusted life years for the cohort (after subtracting QALY loss from events).
-- Monetized_QALY: Total QALYs multiplied by the societal willingness-to-pay per QALY.
-- Productivity_Gain: Societal productivity gain from MACE/ESRD events averted.
-- Welfare_Program_Saving: Societal welfare program cost saving from MACE/ESRD events averted.
-- Net_Benefit: Monetized_QALY plus Productivity_Gain and Welfare_Program_Saving, minus Total_Cost.
-\n")
+# 4. CALCULATE PER CAPITA QALY GAINED AND COST-SAVING
+res <- res %>%
+  arrange(Perspective, Horizon, desc(Strategy)) %>%
+  group_by(Perspective, Horizon) %>%
+  mutate(
+    QALY_gained_per_capita = (QALY - QALY[Strategy == "No_Screen"]) / params$cohort_n,
+    Cost_saving_per_capita = (Total_Cost[Strategy == "No_Screen"] - Total_Cost) / params$cohort_n
+  ) %>%
+  ungroup()
 
-# 5. PEDAGOGICAL NOTE:
-cat("
-Pedagogical Note:
-This model simulates a large cohort (100,000) to ensure event counts are realistic integers. 
-It explicitly models major adverse cardiovascular events (MACE) and end-stage renal disease (ESRD), 
-with all costs and QALY losses assigned to these events. 
-Societal perspective includes not only direct medical costs, but also productivity and welfare program impacts.
-Incremental treatment costs and event-related cost savings are reported separately, 
-so decision makers can see both the costs of early detection and the savings from events averted.
-")
-# ----------------------- #
-# 5. COMPREHENSIVE HEATMAP (Per‑Person) 
-# ----------------------- #
+# 5. OUTPUT TABLE
+output_table <- res %>%
+  select(Strategy, Perspective, Horizon, Total_Cost, QALY, QALY_gained_per_capita, Cost_saving_per_capita)
 
-# 5.1 Create a per‑person copy of res
-res_pp <- res
+print(output_table, digits = 3)
 
-# Divide all cost/benefit columns by cohort size
-per_person_cols <- c(
-  "Treatment_Cost", "Event_Cost", "Total_Cost",
-  "QALY", "Monetized_QALY",
-  "Productivity_Gain", "Welfare_Program_Saving",
-  "Net_Benefit"
-)
-res_pp[per_person_cols] <- res_pp[per_person_cols] / params$cohort_n
+cat("\nColumn notes:\n")
+cat("- QALY_gained_per_capita: Per-person QALY gained by screening vs. no screening\n")
+cat("- Cost_saving_per_capita: Per-person cost saving by screening vs. no screening\n")
 
-# Scenario label
-res_pp$Scenario <- paste(res_pp$Strategy, res_pp$Perspective, res_pp$Horizon, sep = "_")
+# 6. HEATMAP PREP
+heatmap_data <- res %>%
+  mutate(
+    Scenario = paste(Strategy, Perspective, Horizon, sep = "_")
+  ) %>%
+  select(Scenario, QALY_gained_per_capita, Cost_saving_per_capita) %>%
+  reshape2::melt(id.vars = "Scenario", variable.name = "Metric", value.name = "Value")
 
-# Melt to long form
-long_pp <- reshape2::melt(
-  res_pp,
-  id.vars     = "Scenario",
-  measure.vars = c(
-    per_person_cols,
-    "MACE_Events", "ESRD_Events", "Deaths"
-  ),
-  variable.name = "Metric",
-  value.name    = "Value"
-)
-
-# 5.2 Plot per‑person heatmap
-heatmap_pp <- ggplot(long_pp, aes(x = Metric, y = Scenario, fill = Value)) +
+# 7. HEATMAP
+gg <- ggplot(heatmap_data, aes(x = Metric, y = Scenario, fill = Value)) +
   geom_tile(color = "white") +
-  geom_text(aes(label = ifelse(
-    Metric %in% per_person_cols,
-    scales::comma(round(Value, 2)),          # two decimals + comma
-    as.integer(Value)                        # integer for counts
-  )), size = 2.5) +
-  scale_fill_gradient(low = "white", high = "steelblue") +
+  geom_text(aes(label = round(Value, 3)), size = 3) +
+  scale_fill_gradient2(low = "red", mid = "white", high = "steelblue", midpoint = 0) +
   labs(
-    title = "Per‑Person CBA Results by Scenario",
-    subtitle = "Costs, QALYs and Savings are divided by cohort size",
-    x = NULL, y = NULL, fill = "Value per Person"
+    title = "Per Capita QALY Gained and Cost Saving by Scenario",
+    x = NULL, y = NULL, fill = "Per Capita Value"
   ) +
-  theme_minimal(base_size = 10) +
+  theme_minimal(base_size = 12) +
   theme(
     axis.text.x = element_text(angle = 45, hjust = 1),
-    axis.text.y = element_text(size = 8),
+    axis.text.y = element_text(size = 10),
     panel.grid = element_blank()
   )
-
-print(heatmap_pp)
-
+print(gg)
 
