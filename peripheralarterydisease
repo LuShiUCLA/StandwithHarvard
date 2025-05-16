@@ -1,135 +1,171 @@
-# 0. PACKAGE MANAGEMENT
-if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
-if (!requireNamespace("ggplot2", quietly = TRUE)) install.packages("ggplot2")
-if (!requireNamespace("reshape2", quietly = TRUE)) install.packages("reshape2")
-library(dplyr)
-library(ggplot2)
-library(reshape2)
+#--------------------------------------------------------------
+# PAD Screening Cost-Effectiveness Analysis - Updated Full R Program
+#--------------------------------------------------------------
 
-# 1. INPUT PARAMETERS
+# Load required packages
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(dplyr, tidyr, ggplot2, openxlsx)
+
+#-------------------------
+# 1. Updated Model Parameters
+#-------------------------
 params <- list(
-  cohort_n        = 500,
-  prevalence      = 0.20,
-  abi_cost        = 100,
-  visit_cost      = 200,
-  med_monthly     = 11.12 * 2,
-  # Only used for illustration, not applied in this simplified model
-  tx_cost = list(
-    medicaid = c(asymptomatic=1200, symptomatic=1500, cli=15000, amputation=30000),
-    societal = c(asymptomatic=1500, symptomatic=1800, cli=18000, amputation=45000)
+  cohort_size = 100000,
+  base_age = 50,
+  retirement_age = 68,
+  screen_cost = 200,  # ABI + visit
+  
+  # Annual transition probabilities
+  probabilities = list(
+    screen = list(
+      mace = 0.025,        # 50% RR vs no-screening
+      amputation = 0.012,  # 40% RR vs no-screening
+      death = 0.028,       # 30% RR vs no-screening
+      revasc = 0.035       # 30% RR vs no-screening
+    ),
+    no_screen = list(
+      mace = 0.050,
+      amputation = 0.020,
+      death = 0.040,
+      revasc = 0.050
+    )
   ),
-  trans_probs = list(
-    screen    = c(mace=0.02, esrd=0.005, death=0.01),
-    no_screen = c(mace=0.03, esrd=0.007, death=0.01)
+  
+  # Cost inputs (2023 USD)
+  costs = list(
+    mace = 20000,
+    amputation = 50000,
+    revasc = 12000,
+    padcare = 1500,
+    productivity = 35000,
+    welfare = 15000
   ),
-  mace_cost = 25000,
-  esrd_cost = 90000,
-  prod_loss_mace = 10000,
-  prod_loss_esrd = 25000,
-  welfare_cost_mace = 5000,
-  welfare_cost_esrd = 10000,
-  qaly_loss_mace = 0.2,
-  qaly_loss_esrd = 0.4
+  
+  # QALY weights
+  qaly_weights = list(
+    healthy = 1.00,
+    pad = 0.80,
+    mace = 0.65,
+    amputation = 0.54,
+    death = 0.00
+  )
 )
 
-# 2. ANALYSIS FUNCTION (PERSPECTIVE-SPECIFIC)
-run_analysis <- function(strategy, perspective, horizon) {
-  p <- params$trans_probs[[ifelse(strategy=="Screen", "screen", "no_screen")]]
-  n <- params$cohort_n
+#-------------------------
+# 2. Simulation Function
+#-------------------------
+simulate_strategy <- function(strategy, max_years) {
+  living <- rep(TRUE, params$cohort_size)
+  age <- params$base_age
+  results <- list()
   
-  # Event counts
-  mace_events <- n * p["mace"] * horizon
-  esrd_events <- n * p["esrd"] * horizon
-  deaths      <- n * p["death"] * horizon
+  cumulative_mace <- cumulative_amputation <- cumulative_revasc <- cumulative_deaths <- 0
   
-  # Treatment cost: only for Screen
-  treat_cost <- if(strategy == "Screen") {
-    screening_cost <- n * (params$abi_cost + params$visit_cost)
-    med_cost <- n * params$prevalence * horizon * 12 * params$med_monthly
-    screening_cost + med_cost
-  } else 0
+  for (year in 1:max_years) {
+    if (age >= params$retirement_age) break
+    
+    p <- params$probabilities[[strategy]]
+    at_risk <- sum(living)
+    
+    new_deaths <- rbinom(1, at_risk, p$death)
+    new_mace <- rbinom(1, at_risk - new_deaths, p$mace)
+    new_amputation <- rbinom(1, at_risk - new_deaths - new_mace, p$amputation)
+    new_revasc <- rbinom(1, at_risk - new_deaths - new_mace - new_amputation, p$revasc)
+    
+    cumulative_deaths <- cumulative_deaths + new_deaths
+    cumulative_mace <- cumulative_mace + new_mace
+    cumulative_amputation <- cumulative_amputation + new_amputation
+    cumulative_revasc <- cumulative_revasc + new_revasc
+    
+    if (new_deaths > 0) living[sample(which(living), new_deaths)] <- FALSE
+    
+    results[[year]] <- data.frame(
+      year = year,
+      strategy = strategy,
+      living = sum(living),
+      mace = cumulative_mace,
+      amputation = cumulative_amputation,
+      revasc = cumulative_revasc,
+      deaths = cumulative_deaths
+    )
+    
+    age <- age + 1
+  }
   
-  # Event costs (same for both perspectives)
-  event_cost <- mace_events * params$mace_cost + esrd_events * params$esrd_cost
-  
-  # Societal costs (only for societal perspective)
-  prod_loss <- if(perspective == "societal") {
-    mace_events * params$prod_loss_mace + esrd_events * params$prod_loss_esrd
-  } else 0
-  welfare_cost <- if(perspective == "societal") {
-    mace_events * params$welfare_cost_mace + esrd_events * params$welfare_cost_esrd
-  } else 0
-  
-  # Total cost
-  total_cost <- treat_cost + event_cost + prod_loss + welfare_cost
-  
-  # QALY calculation
-  qaly_loss <- mace_events * params$qaly_loss_mace + esrd_events * params$qaly_loss_esrd
-  qaly <- n * horizon - qaly_loss
-  
-  data.frame(
-    Strategy = strategy,
-    Perspective = perspective,
-    Horizon = horizon,
-    Total_Cost = total_cost,
-    QALY = qaly,
-    stringsAsFactors = FALSE
-  )
+  bind_rows(results) %>%
+    filter(year == max(year)) %>%
+    mutate(
+      productive_years = pmax(0, params$retirement_age - (params$base_age + year)),
+      payer_cost = mace * params$costs$mace +
+        amputation * params$costs$amputation +
+        revasc * params$costs$revasc +
+        params$cohort_size * params$costs$padcare * year +
+        ifelse(strategy == "screen", params$screen_cost * params$cohort_size, 0),
+      
+      societal_cost = payer_cost + deaths * (params$costs$productivity + params$costs$welfare) * productive_years,
+      
+      qaly = living * params$qaly_weights$pad -
+        (mace * (params$qaly_weights$pad - params$qaly_weights$mace) +
+           amputation * (params$qaly_weights$pad - params$qaly_weights$amputation) +
+           deaths * params$qaly_weights$pad)
+    )
 }
 
-# 3. RUN ALL SCENARIOS
-scenarios <- expand.grid(
-  Strategy    = c("Screen","No_Screen"),
-  Perspective = c("medicaid","societal"),
-  Horizon     = c(5,30),
-  stringsAsFactors = FALSE
-)
-res <- do.call(rbind, lapply(seq_len(nrow(scenarios)), function(i) {
-  run_analysis(scenarios$Strategy[i], scenarios$Perspective[i], scenarios$Horizon[i])
-}))
+#-------------------------
+# 3. Analysis Function
+#-------------------------
+analyze_strategies <- function(horizons = c(5, 15, 30)) {
+  map_dfr(horizons, function(h) {
+    screen <- simulate_strategy("screen", h)
+    control <- simulate_strategy("no_screen", h)
+    
+    data.frame(
+      horizon = h,
+      deaths_averted = control$deaths - screen$deaths,
+      mace_averted = control$mace - screen$mace,
+      amputation_averted = control$amputation - screen$amputation,
+      payer_saving = control$payer_cost - screen$payer_cost,
+      societal_saving = control$societal_cost - screen$societal_cost,
+      qaly_gain = screen$qaly - control$qaly
+    )
+  }) %>%
+    mutate(across(-horizon, ~ ./params$cohort_size * 1000))
+}
 
-# 4. CALCULATE PER CAPITA QALY GAINED AND COST-SAVING
-res <- res %>%
-  arrange(Perspective, Horizon, desc(Strategy)) %>%
-  group_by(Perspective, Horizon) %>%
-  mutate(
-    QALY_gained_per_capita = (QALY - QALY[Strategy == "No_Screen"]) / params$cohort_n,
-    Cost_saving_per_capita = (Total_Cost[Strategy == "No_Screen"] - Total_Cost) / params$cohort_n
-  ) %>%
-  ungroup()
+#-------------------------
+# 4. Run Analysis
+#-------------------------
+set.seed(2023)
+results <- analyze_strategies()
 
-# 5. OUTPUT TABLE
-output_table <- res %>%
-  select(Strategy, Perspective, Horizon, Total_Cost, QALY, QALY_gained_per_capita, Cost_saving_per_capita)
+#-------------------------
+# 5. Visualization
+#-------------------------
+ggplot(results %>% 
+         pivot_longer(-horizon, names_to = "metric") %>%
+         mutate(metric = factor(metric,
+                                levels = c("deaths_averted", "mace_averted", "amputation_averted",
+                                           "payer_saving", "societal_saving", "qaly_gain"),
+                                labels = c("Deaths Averted/1000", "MACE Averted/1000", 
+                                           "Amputations Averted/1000", "Payer Savings ($/capita)",
+                                           "Societal Savings ($/capita)", "QALY Gain/1000"))),
+       aes(x = factor(horizon), y = value)) +
+  geom_col(fill = "steelblue", width = 0.7) +
+  facet_wrap(~metric, scales = "free_y", ncol = 3) +
+  labs(title = "PAD Screening Cost-Effectiveness Analysis",
+       subtitle = "Per 1,000 Population Comparison",
+       x = "Time Horizon (Years)",
+       y = "Value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
-print(output_table, digits = 3)
-
-cat("\nColumn notes:\n")
-cat("- QALY_gained_per_capita: Per-person QALY gained by screening vs. no screening\n")
-cat("- Cost_saving_per_capita: Per-person cost saving by screening vs. no screening\n")
-
-# 6. HEATMAP PREP
-heatmap_data <- res %>%
-  mutate(
-    Scenario = paste(Strategy, Perspective, Horizon, sep = "_")
-  ) %>%
-  select(Scenario, QALY_gained_per_capita, Cost_saving_per_capita) %>%
-  reshape2::melt(id.vars = "Scenario", variable.name = "Metric", value.name = "Value")
-
-# 7. HEATMAP
-gg <- ggplot(heatmap_data, aes(x = Metric, y = Scenario, fill = Value)) +
-  geom_tile(color = "white") +
-  geom_text(aes(label = round(Value, 3)), size = 3) +
-  scale_fill_gradient2(low = "red", mid = "white", high = "steelblue", midpoint = 0) +
-  labs(
-    title = "Per Capita QALY Gained and Cost Saving by Scenario",
-    x = NULL, y = NULL, fill = "Per Capita Value"
-  ) +
-  theme_minimal(base_size = 12) +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    axis.text.y = element_text(size = 10),
-    panel.grid = element_blank()
-  )
-print(gg)
-
+#-------------------------
+# 6. Export to Excel
+#-------------------------
+write.xlsx(list(
+  Parameters = data.frame(
+    Parameter = names(unlist(params)),
+    Value = unlist(params)
+  ),
+  Results = results
+), "PAD_Analysis_Results_Updated.xlsx")
